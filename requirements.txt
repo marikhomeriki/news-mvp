@@ -1,0 +1,7 @@
+streamlit
+trafilatura
+beautifulsoup4
+tenacity
+numpy
+openai
+tiktoken
