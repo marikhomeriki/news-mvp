@@ -110,40 +110,57 @@ url = st.text_input("Paste article URL", placeholder="https://example.com/news/.
 if not url:
     st.stop()
 
+# --- Session state setup (add near top of file, right after imports if you want) ---
+if "article_text" not in st.session_state:
+    st.session_state.article_text = ""
+if "meta" not in st.session_state:
+    st.session_state.meta = {}
+
+# --- Fetch article button ---
 if st.button("Fetch article"):
     with st.spinner("Fetching and extracting article..."):
-        article_text, meta = fetch_and_extract(url)
-
-    if not article_text:
+        text, meta = fetch_and_extract(url)
+    if not text:
         st.error("Could not extract article text. Try another URL.")
         st.stop()
 
+    st.session_state.article_text = text
+    st.session_state.meta = meta
     st.success("✅ Article extracted successfully!")
-    if meta.get("title"):
-        st.write(f"**Title:** {meta['title']}")
-    st.write(f"**Source:** {meta['url']}")
-    with st.expander("Show extracted text"):
-        st.text_area("Extracted Article Text", article_text, height=300)
 
-    # ---------- SUMMARY ----------
+# --- Show article if we have one ---
+if st.session_state.article_text:
+    meta = st.session_state.meta
+    st.write(f"**Title:** {meta.get('title') or 'Unknown'}")
+    st.write(f"**Source:** {meta.get('url')}")
+    with st.expander("Show extracted text"):
+        st.text_area("Extracted Article Text", st.session_state.article_text, height=300)
+
+    # --- Summarize button ---
     if st.button("Summarize Article"):
         with st.spinner("Summarizing..."):
-            sys_prompt = (
+            system_prompt = (
                 "You are a precise news analyst. Write a crisp, neutral summary with bullet points, "
                 "including: What happened, who is involved, when/where, why it matters, and any numbers. "
                 "Avoid hype; be factual."
             )
-            user_prompt = f"Summarize the following article in 120-160 words, then add 3 bullet-point key takeaways.\n\n{article_text}"
-            summary = call_chat_model(sys_prompt, user_prompt, MODEL_SUMMARY)
+            user_prompt = (
+                f"Summarize the following article in 120–160 words, then add 3 bullet-point key takeaways.\n\n"
+                f"{st.session_state.article_text}"
+            )
+            summary = call_chat_model(system_prompt, user_prompt, MODEL_SUMMARY)
         st.subheader("Summary")
         st.write(summary)
 
-    # ---------- Q&A ----------
-    st.markdown("---")
-    st.subheader("Ask questions about this article")
 
-    chunks = chunk_text(article_text)
+    # ---------- Q&A ----------
+st.markdown("---")
+st.subheader("Ask questions about this article")
+
+if st.session_state.article_text:
+    chunks = chunk_text(st.session_state.article_text)
     chunk_vecs = embed_texts(chunks)
+
     question = st.text_input("Your question", placeholder="e.g., What are the main policy changes?")
     top_k = st.slider("Number of context chunks", 1, 5, 3)
 
@@ -163,6 +180,9 @@ if st.button("Fetch article"):
 
         st.subheader("Answer")
         st.write(answer)
+else:
+    st.warning("Please fetch an article first.")
+    st.stop()
 
 st.markdown("---")
 st.caption("Tip: If extraction looks messy, try another site or paste the text directly.")
