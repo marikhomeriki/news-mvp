@@ -20,36 +20,57 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 # -------------- HELPERS --------------
 def fetch_and_extract(url: str):
     """Fetch and extract main article text."""
+    # Step 1: fetch HTML content
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
         return "", {"title": None, "url": url}
 
+    # Step 2: try Trafilatura extraction
     result = trafilatura.extract(
-    downloaded,
-    include_images=False,
-    include_links=False,
-    favor_recall=True,
-)
+        downloaded,
+        include_images=False,
+        include_links=False,
+        favor_recall=True,
+    )
 
+    # Step 3: fallback to BeautifulSoup if Trafilatura fails
     if not result:
-        # Fallback to BeautifulSoup
         try:
             from urllib.request import Request, urlopen
             req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
             html = urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
+
+            # remove scripts/styles
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
+
+            # extract paragraph text
             text = "\n".join(p.get_text(strip=True) for p in soup.find_all("p"))
         except Exception:
             text = ""
     else:
-        text = result
+        text = result or ""
 
-    # Title
+    # Step 4: cleanup layer
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Remove duplicate sentences
+    seen, unique = set(), []
+    for line in text.split(". "):
+        if line not in seen:
+            seen.add(line)
+            unique.append(line)
+    text = ". ".join(unique)
+
+    # Step 5: extract title metadata
     meta = trafilatura.extract_metadata(downloaded)
     title = meta.title if meta and getattr(meta, "title", None) else None
-    return text or "", {"title": title, "url": url}
+
+    # Step 6: return cleaned text + metadata
+    return text, {"title": title, "url": url}
+
 
 
 def chunk_text(text: str, max_chars: int = 2800):
