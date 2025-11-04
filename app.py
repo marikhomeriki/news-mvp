@@ -10,7 +10,15 @@ import numpy as np
 import streamlit as st
 import trafilatura
 from bs4 import BeautifulSoup
+from urllib.request import Request, urlopen
 from openai import OpenAI
+import logging
+logging.basicConfig(
+    filename="app.log",        # name of the log file in your project folder
+    level=logging.INFO,        # log info and above (warning, error)
+    format="%(asctime)s - %(levelname)s - %(message)s"  # optional: timestamp format
+)
+
 
 # -------------- CONFIG --------------
 MODEL_SUMMARY = os.getenv("MODEL_SUMMARY", "gpt-4o-mini")
@@ -19,57 +27,74 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 
 # -------------- HELPERS --------------
 def fetch_and_extract(url: str):
-    """Fetch and extract main article text."""
-    # Step 1: fetch HTML content
+    """Fetch and extract main article text with fallback, cleanup, paywall detection, and optional JS render."""
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
-        return "", {"title": None, "url": url}
+        logging.warning(f"Failed to fetch HTML from: {url}")
+        return "", {"title": "Fetch failed", "url": url}
 
-    # Step 2: try Trafilatura extraction
+    # Known paywalls (skip early—don’t hammer)
+    paywall_domains = ["nytimes.com", "wsj.com", "bloomberg.com", "thetimes.co.uk"]
+    if any(d in url for d in paywall_domains):
+        logging.warning(f"Known paywalled domain detected: {url}")
+        return "", {"title": "Paywalled article", "url": url}
+
+    # Trafilatura
     result = trafilatura.extract(
-        downloaded,
-        include_images=False,
-        include_links=False,
-        favor_recall=True,
+        downloaded, include_images=False, include_links=False, favor_recall=True
     )
 
-    # Step 3: fallback to BeautifulSoup if Trafilatura fails
     if not result:
+        # BeautifulSoup fallback
         try:
             from urllib.request import Request, urlopen
             req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
             html = urlopen(req, timeout=15).read().decode("utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
-
-            # remove scripts/styles
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
-
-            # extract paragraph text
-            text = "\n".join(p.get_text(strip=True) for p in soup.find_all("p"))
-        except Exception:
+            text = " ".join(p.get_text(strip=True) for p in soup.find_all("p"))
+            logging.info(f"Used BeautifulSoup fallback for {url}")
+        except Exception as e:
+            logging.error(f"BeautifulSoup fallback failed for {url}: {e}")
             text = ""
     else:
         text = result or ""
 
-    # Step 4: cleanup layer
-    # Normalize whitespace
-    text = re.sub(r"\s+", " ", text).strip()
+    # If still too short, **optional** JS-rendered fallback (slow)
+    if len(text) < 600:
+        try:
+            from requests_html import HTMLSession
+            s = HTMLSession()
+            r = s.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            r.html.render(timeout=20, sleep=1)  # launches headless Chromium; slow
+            # collect visible paragraph text
+            text = " ".join([e.text for e in r.html.find("p") if e.text])
+            logging.info(f"Rendered extraction attempt for {url} (len={len(text)})")
+        except Exception as e:
+            logging.warning(f"Rendered extraction failed for {url}: {e}")
 
-    # Remove duplicate sentences
-    seen, unique = set(), []
-    for line in text.split(". "):
-        if line not in seen:
-            seen.add(line)
-            unique.append(line)
-    text = ". ".join(unique)
+    # Cleanup
+    text = re.sub(r"\s+", " ", text or "").strip()
+    seen, uniq = set(), []
+    for sent in text.split(". "):
+        if sent and sent not in seen:
+            seen.add(sent)
+            uniq.append(sent)
+    text = ". ".join(uniq)
 
-    # Step 5: extract title metadata
+    # Final checks
+    if len(text) < 600:
+        logging.warning(f"No visible text extracted — likely paywalled or JS-rendered: {url}")
+        return "", {"title": "Paywalled or restricted", "url": url}
+
     meta = trafilatura.extract_metadata(downloaded)
     title = meta.title if meta and getattr(meta, "title", None) else None
-
-    # Step 6: return cleaned text + metadata
+    logging.info(f"Fetched article from {url}, length={len(text)}")
     return text, {"title": title, "url": url}
+
+
+
 
 
 
@@ -139,15 +164,30 @@ if "meta" not in st.session_state:
 
 # --- Fetch article button ---
 if st.button("Fetch article"):
-    with st.spinner("Fetching and extracting article..."):
-        text, meta = fetch_and_extract(url)
-    if not text:
-        st.error("Could not extract article text. Try another URL.")
+    # --- Optional deny list for paywalled sites ---
+    deny = ["nytimes.com", "wsj.com", "bloomberg.com", "ft.com", "thetimes.co.uk"]
+    if any(d in url for d in deny):
+        st.warning("⚠️ This site is usually paywalled. Try another source (BBC, Reuters, Guardian).")
         st.stop()
 
+    with st.spinner("Fetching and extracting article..."):
+        text, meta = fetch_and_extract(url)
+
+    # --- Handle paywalled / failed / restricted articles ---
+    if not text:
+        title = (meta or {}).get("title", "")
+        if "Paywalled" in title or "restricted" in title or "Fetch failed" in title:
+            st.warning("⚠️ This article appears paywalled or dynamically rendered (login/JS). Try a different source.")
+        else:
+            st.error("❌ Could not extract article text. Try another URL.")
+        st.stop()
+
+    # --- Success path ---
     st.session_state.article_text = text
     st.session_state.meta = meta
     st.success("✅ Article extracted successfully!")
+
+
 
 # --- Show article if we have one ---
 if st.session_state.article_text:
